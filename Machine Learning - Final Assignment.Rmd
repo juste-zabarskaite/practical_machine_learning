@@ -1,0 +1,123 @@
+---
+title: 'Practical Machine Learning: Peer-graded Assignment: Prediction Assignment Writeup'
+author: "Juste Zabarskaite"
+date: "December 20, 2016"
+output: html_document
+---
+
+```{r, echo = FALSE, message = FALSE, warning = FALSE, tidy = FALSE, results='hide', error=FALSE}
+packages <- c( 'knitr', 'caret', 'AppliedPredictiveModeling', 'ElemStatLearn', 'pgmm', 'rpart', 'gbm', 'lubridate', 'forecast', 'e1071', 'rattle', 'rpart.plot', 'randomForest', 'RANN', 'MASS')
+for (package in packages) {
+    if (!require(package, character.only=T, quietly=T)) {
+        install.packages(package)
+        library(package, character.only=T)
+    }
+}
+```
+
+Install packages `r packages`.
+
+````{r setup, cache = FALSE, echo = FALSE, message = FALSE, warning = FALSE, tidy = FALSE, results='hide', error=FALSE}
+# make this an external chunk that can be included in any file
+options(width = 100)
+library(knitr)
+opts_chunk$set(message = F, error = F, warning = F, comment = NA, fig.align = 'center', dpi = 100, tidy = F, cache.path = '.cache/', fig.path = 'fig/')
+
+options(xtable.type = 'html')
+knit_hooks$set(inline = function(x) {
+  if(is.numeric(x)) {
+    round(x, getOption('digits'))
+  } else {
+    paste(as.character(x), collapse = ', ')
+  }
+})
+knit_hooks$set(plot = knitr:::hook_plot_html)
+runif(1)
+```
+
+## Downloading Data
+
+Download [Weight Lifting Exercise Dataset](http://groupware.les.inf.puc-rio.br/har). 
+
+```{r, cache = TRUE}
+source_train <- "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv"
+source_test <- "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv"
+destfile_train = "./pml-training.csv"
+destfile_test = "./pml-testing.csv"
+## download files
+if(!file.exists(destfile_train)) { download.file(source_train,destfile_train) }
+if(!file.exists(destfile_test)) { download.file(source_test,destfile_test) }
+## import data
+training <- read.csv(destfile_train, na.strings=c("#DIV/0!") )
+testing <- read.csv(destfile_test, na.strings=c("#DIV/0!"))
+outcome <- "classe"
+```
+
+The training set contains `r dim(training)[1]` observations with `r dim(training)[2]` variables. The testing set contains `r dim(testing)[1]` observations with `r dim(testing)[2]` variables. 
+
+## Data Processing
+
+Add new variables for time series effect.
+
+```{r}
+## plot(decompose(ts1),xlab="Years+1")
+training2 <- training
+training2$raw_timestamp_part_1_POSIXct <- as.POSIXct(as.numeric(as.character(training$raw_timestamp_part_1)),origin="1970-01-01",tz="GMT")
+training2$weekdays <- as.factor(weekdays(training2$raw_timestamp_part_1_POSIXct))
+training2$hours <- format(training2$raw_timestamp_part_1_POSIXct,'%H')
+```
+
+Exclude predictors with low variance.
+
+```{r}
+to_exclude <- nearZeroVar(training2)
+training2 <- training[, -to_exclude]
+testing2 <- testing[, -to_exclude]
+```
+
+Center, scale, impute missing values and perform Principal Component Analysis (PCA) on predictors to reduce the risk of overfitting. 
+
+```{r}
+training2 <- training2[,-which(colnames(training2)==outcome )]
+preprocessParams <- preProcess(training2, method=c("center", "scale", "pca", "knnImpute"))
+training3 <- predict(preprocessParams, training2)
+training3[,outcome] <- training[,outcome]
+## same processing for testing set
+testing3 <- predict(preprocessParams, testing2)
+```
+
+The processed set contains `r dim(training3)[1]` observations with `r dim(training3)[2]` variables (reduction from original `r dim(testing)[2]` variables).
+
+### Fit alternative models
+
+```{r, echo=FALSE, cache=TRUE}
+set.seed(62433)
+train_control<- trainControl(method="cv", number=10, savePredictions = TRUE, repeats=3)
+mod4 = train(classe ~ ., data = training3, trControl=train_control, method = 'lda')
+mod5 = train(classe ~ ., data = training3, trControl=train_control, method = 'rpart')
+mod1 = train(classe ~ ., data = training3, trControl=train_control, method = 'bayesglm')
+mod2 = train(classe ~ ., data = training3, trControl=train_control, method = 'rda')
+```
+
+I did not run glm, gbm and rf methods due to lack of computation power on my computer.
+
+### Cross-validation - compare accuracy
+
+```{r}
+cm4 <- confusionMatrix(mod4$pred$pred, mod4$pred$obs)
+cm5 <- confusionMatrix(mod5$pred$pred, mod5$pred$obs)
+cm1 <- confusionMatrix(mod1$pred$pred, mod1$pred$obs)
+cm2 <- confusionMatrix(mod2$pred$pred, mod2$pred$obs)
+df <- data.frame(method=c("lda_mod4", "rpart_mod5", "bayesglm_mod1", "rda_mod2"), accuracy=c( cm4$overall['Accuracy'], cm5$overall['Accuracy'], cm1$overall['Accuracy'], cm2$overall['Accuracy'] ))
+df <- df[with(df, order(-accuracy)), ]
+df
+```
+
+The model with highest accuracy is `r df$method[1]` with accuracy `r df$accuracy[1]`.
+
+### Predict values for testing set
+
+```{r}
+## predict
+predict(mod4, testing3)
+```
