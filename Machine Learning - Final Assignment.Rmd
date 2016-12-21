@@ -6,7 +6,7 @@ output: html_document
 ---
 
 ```{r, echo = FALSE, message = FALSE, warning = FALSE, tidy = FALSE, results='hide', error=FALSE}
-packages <- c( 'knitr', 'caret', 'AppliedPredictiveModeling', 'ElemStatLearn', 'pgmm', 'rpart', 'gbm', 'lubridate', 'forecast', 'e1071', 'rattle', 'rpart.plot', 'randomForest', 'RANN', 'MASS')
+packages <- c( 'knitr', 'caret', 'AppliedPredictiveModeling', 'ElemStatLearn', 'pgmm', 'rpart', 'gbm', 'lubridate', 'forecast', 'e1071', 'rattle', 'rpart.plot', 'randomForest', 'RANN', 'MASS', 'ranger', 'xgboost')
 for (package in packages) {
     if (!require(package, character.only=T, quietly=T)) {
         install.packages(package)
@@ -14,6 +14,14 @@ for (package in packages) {
     }
 }
 ```
+
+## Background
+
+Using devices such as Jawbone Up, Nike FuelBand, and Fitbit it is now possible to collect a large amount of data about personal activity relatively inexpensively. In this project, your goal will be to use data from accelerometers on the belt, forearm, arm, and dumbell of 6 participants. They were asked to perform barbell lifts correctly and incorrectly in 5 different ways. More information is available from the website here: http://groupware.les.inf.puc-rio.br/har (see the section on the Weight Lifting Exercise Dataset).
+
+The purpose of this project is to build a model to predict quality ('classe') of the exercise.
+
+## Packages & Downloading Data
 
 Install packages `r packages`.
 
@@ -35,8 +43,6 @@ knit_hooks$set(plot = knitr:::hook_plot_html)
 runif(1)
 ```
 
-## Downloading Data
-
 Download [Weight Lifting Exercise Dataset](http://groupware.les.inf.puc-rio.br/har). 
 
 ```{r, cache = TRUE}
@@ -48,76 +54,142 @@ destfile_test = "./pml-testing.csv"
 if(!file.exists(destfile_train)) { download.file(source_train,destfile_train) }
 if(!file.exists(destfile_test)) { download.file(source_test,destfile_test) }
 ## import data
-training <- read.csv(destfile_train, na.strings=c("#DIV/0!") )
-testing <- read.csv(destfile_test, na.strings=c("#DIV/0!"))
+training_orig <- read.csv(destfile_train, na.strings=c("NA","#DIV/0!","") )
+validation_orig <- read.csv(destfile_test, na.strings=c("NA","#DIV/0!","") )
 outcome <- "classe"
 ```
 
-The training set contains `r dim(training)[1]` observations with `r dim(training)[2]` variables. The testing set contains `r dim(testing)[1]` observations with `r dim(testing)[2]` variables. 
+The training set contains `r dim(training_orig)[1]` observations with `r dim(training_orig)[2]` variables. The validation data set contains `r dim(validation_orig)[1]` observations with `r dim(validation_orig)[2]` variables. 
 
 ## Data Processing
 
-Add new variables for time series effect.
+Add new 'hour' to capture time series effect, if any.
 
 ```{r}
-## plot(decompose(ts1),xlab="Years+1")
-training2 <- training
-training2$raw_timestamp_part_1_POSIXct <- as.POSIXct(as.numeric(as.character(training$raw_timestamp_part_1)),origin="1970-01-01",tz="GMT")
-training2$weekdays <- as.factor(weekdays(training2$raw_timestamp_part_1_POSIXct))
-training2$hours <- format(training2$raw_timestamp_part_1_POSIXct,'%H')
+training <- training_orig
+training$raw_timestamp_part_1_POSIXct <- as.POSIXct(as.numeric(as.character(training$raw_timestamp_part_1)),origin="1970-01-01",tz="GMT")
+training$hours <- as.numeric(format(training$raw_timestamp_part_1_POSIXct,'%H'))
+## ditto for validation data set
+validation <- validation_orig
+validation$raw_timestamp_part_1_POSIXct <- as.POSIXct(as.numeric(as.character(validation$raw_timestamp_part_1)),origin="1970-01-01",tz="GMT")
+validation$hours <- as.numeric(format(validation$raw_timestamp_part_1_POSIXct,'%H'))
 ```
+
+Exclude predictors that are missing (NA) in the validation data set (they will not help even if they have prediction power in the training set).
+
+```{r}
+validation <- validation[colSums(is.na(validation)) < 1*nrow(validation)]
+## keep the same columns for the training set
+cols <- names(validation)
+training <- training[ , which(names(training) %in% c(cols,outcome))]
+```
+
+Exclude time stamp & index predictors that can mislead the model.
+
+```{r}
+colsrm <- c("X", "raw_timestamp_part_1", "raw_timestamp_part_2", "cvtd_timestamp", "raw_timestamp_part_1_POSIXct")
+training <- training[ , -which(names(training) %in% c(colsrm))]
+validation <- validation[ , -which(names(validation) %in% c(colsrm))]
+```
+
+The training set contains `r dim(training)[1]` observations with `r dim(training)[2]` variables.
+
+Check predictors with >20% missing values.
+
+```{r}
+colnames(training)[colSums(is.na(training)) >= 0.2*nrow(training)]
+```
+
+No such predictors. No need to remove anything.
 
 Exclude predictors with low variance.
 
 ```{r}
-to_exclude <- nearZeroVar(training2)
+to_exclude <- nearZeroVar(training)
 training2 <- training[, -to_exclude]
-testing2 <- testing[, -to_exclude]
+## ditto for validation set
+validation2 <- validation[, -to_exclude]
 ```
 
-Center, scale, impute missing values and perform Principal Component Analysis (PCA) on predictors to reduce the risk of overfitting. 
+The processed set contains `r dim(training2)[1]` observations with `r dim(training2)[2]` variables (reduction from original `r dim(training_orig)[2]` variables).
+
+### Create Test Set
 
 ```{r}
-training2 <- training2[,-which(colnames(training2)==outcome )]
-preprocessParams <- preProcess(training2, method=c("center", "scale", "pca", "knnImpute"))
-training3 <- predict(preprocessParams, training2)
-training3[,outcome] <- training[,outcome]
-## same processing for testing set
-testing3 <- predict(preprocessParams, testing2)
+set.seed(123)
+partition <- createDataPartition(training$classe, p = 0.75, list = FALSE)
+training3 <- training2[partition,]
+testing3 <- training2[-partition,]
 ```
 
-The processed set contains `r dim(training3)[1]` observations with `r dim(training3)[2]` variables (reduction from original `r dim(testing)[2]` variables).
+Training set now contains `r dim(training3)[1]` observations with `r dim(training3)[2]` variables.
+
+Testing set now contains `r dim(testing3)[1]` observations with `r dim(testing3)[2]` variables.
 
 ### Fit alternative models
 
+- Random Forest (rf)
+- Stochastic Gradient Boosting (gbm)
+- Conditional Inference Tree (ctree)
+- Linear Discriminant Analysis (lda)
+- CART (rpart)
+
 ```{r, echo=FALSE, cache=TRUE}
 set.seed(62433)
-train_control<- trainControl(method="cv", number=10, savePredictions = TRUE, repeats=3)
-mod4 = train(classe ~ ., data = training3, trControl=train_control, method = 'lda')
-mod5 = train(classe ~ ., data = training3, trControl=train_control, method = 'rpart')
-mod1 = train(classe ~ ., data = training3, trControl=train_control, method = 'bayesglm')
-mod2 = train(classe ~ ., data = training3, trControl=train_control, method = 'rda')
+train_control<- trainControl(method="cv", number=3, savePredictions = TRUE)
+
+mod_rf <- train(classe ~ ., data=training3, method="rf", ntree=500, trControl=train_control, preProc=c("center", "scale", "BoxCox"))
+
+mod_gbm <- train(classe ~ ., data=training3, method="gbm", trControl=train_control, verbose = FALSE)
+
+mod_ctree <- train(classe ~ ., data=training3, method = "ctree", trControl=train_control, preProc = c("center", "scale", "BoxCox"))
+
+mod_lda = train(classe ~ ., data = training3, method = 'lda', trControl=train_control, preProc = c("center", "scale", "BoxCox") )
+
+mod_rpart <- train(classe ~ ., data=training3, method="rpart", trControl=train_control, preProc=c("center", "scale"))
 ```
 
-I did not run glm, gbm and rf methods due to lack of computation power on my computer.
-
-### Cross-validation - compare accuracy
+Combining predictor models.
 
 ```{r}
-cm4 <- confusionMatrix(mod4$pred$pred, mod4$pred$obs)
-cm5 <- confusionMatrix(mod5$pred$pred, mod5$pred$obs)
-cm1 <- confusionMatrix(mod1$pred$pred, mod1$pred$obs)
-cm2 <- confusionMatrix(mod2$pred$pred, mod2$pred$obs)
-df <- data.frame(method=c("lda_mod4", "rpart_mod5", "bayesglm_mod1", "rda_mod2"), accuracy=c( cm4$overall['Accuracy'], cm5$overall['Accuracy'], cm1$overall['Accuracy'], cm2$overall['Accuracy'] ))
-df <- df[with(df, order(-accuracy)), ]
-df
+t_rf <- predict(mod_rf, testing3)
+t_gbm <- predict(mod_gbm, testing3)
+t_ctree <- predict(mod_ctree, testing3)
+t_lda <- predict(mod_lda, testing3)
+t_rpart <- predict(mod_rpart, testing3)
+
+predDF <- data.frame(t_rf,t_gbm,t_ctree,t_lda,t_rpart,classe=testing3$classe)
+mod_comb <- train(classe ~.,method="gam",data=predDF)
+t_comb <- predict(mod_comb,predDF)
 ```
 
-The model with highest accuracy is `r df$method[1]` with accuracy `r df$accuracy[1]`.
+### Check models on testing set
 
-### Predict values for testing set
+```{r}
+cm_rf2 <- confusionMatrix(t_rf, testing3$classe)
+cm_gbm2 <- confusionMatrix(t_gbm, testing3$classe)
+cm_ctree2 <- confusionMatrix(t_ctree, testing3$classe)
+cm_lda2 <- confusionMatrix(t_lda, testing3$classe)
+cm_rpart2 <- confusionMatrix(t_rpart, testing3$classe)
+cm_comb2 <- confusionMatrix(t_comb, testing3$classe)
+
+df2 <- data.frame(method=c("mod_rf", "mod_gbm", "mod_ctree", "mod_lda", "mod_rpart", "mod_comb"), accuracy=c( cm_rf2$overall['Accuracy'], cm_gbm2$overall['Accuracy'], cm_ctree2$overall['Accuracy'], cm_lda2$overall['Accuracy'], cm_rpart2$overall['Accuracy'], cm_comb2$overall['Accuracy'] ))
+df2 <- df2[with(df2, order(-accuracy)), ]
+df2
+```
+
+The model with highest accuracy is `r df2$method[1]` with accuracy `r df2$accuracy[1]`.
+
+## Predict values for validation set
 
 ```{r}
 ## predict
-predict(mod4, testing3)
+pred_rf <- predict(mod_rf, validation2)
+pred_gbm <- predict(mod_gbm, validation2)
+pred_ctree <- predict(mod_ctree, validation2)
+pred_lda <- predict(mod_lda, validation2)
+pred_rpart <- predict(mod_rpart, validation2)
+
+df <- data.frame(pred_rf,pred_gbm,pred_ctree,pred_lda,pred_rpart )
+df
 ```

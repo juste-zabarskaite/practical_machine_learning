@@ -124,9 +124,14 @@ $(document).ready(function () {
 </div>
 
 
-<p>Install packages knitr, caret, AppliedPredictiveModeling, ElemStatLearn, pgmm, rpart, gbm, lubridate, forecast, e1071, rattle, rpart.plot, randomForest, RANN, MASS.</p>
-<div id="downloading-data" class="section level2">
-<h2>Downloading Data</h2>
+<div id="background" class="section level2">
+<h2>Background</h2>
+<p>Using devices such as Jawbone Up, Nike FuelBand, and Fitbit it is now possible to collect a large amount of data about personal activity relatively inexpensively. In this project, your goal will be to use data from accelerometers on the belt, forearm, arm, and dumbell of 6 participants. They were asked to perform barbell lifts correctly and incorrectly in 5 different ways. More information is available from the website here: <a href="http://groupware.les.inf.puc-rio.br/har" class="uri">http://groupware.les.inf.puc-rio.br/har</a> (see the section on the Weight Lifting Exercise Dataset).</p>
+<p>The purpose of this project is to build a model to predict quality (‘classe’) of the exercise.</p>
+</div>
+<div id="packages-downloading-data" class="section level2">
+<h2>Packages &amp; Downloading Data</h2>
+<p>Install packages knitr, caret, AppliedPredictiveModeling, ElemStatLearn, pgmm, rpart, gbm, lubridate, forecast, e1071, rattle, rpart.plot, randomForest, RANN, MASS, ranger, xgboost.</p>
 <p>Download <a href="http://groupware.les.inf.puc-rio.br/har">Weight Lifting Exercise Dataset</a>.</p>
 <pre class="r"><code>source_train &lt;- &quot;https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv&quot;
 source_test &lt;- &quot;https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv&quot;
@@ -136,58 +141,124 @@ destfile_test = &quot;./pml-testing.csv&quot;
 if(!file.exists(destfile_train)) { download.file(source_train,destfile_train) }
 if(!file.exists(destfile_test)) { download.file(source_test,destfile_test) }
 ## import data
-training &lt;- read.csv(destfile_train, na.strings=c(&quot;#DIV/0!&quot;) )
-testing &lt;- read.csv(destfile_test, na.strings=c(&quot;#DIV/0!&quot;))
+training_orig &lt;- read.csv(destfile_train, na.strings=c(&quot;NA&quot;,&quot;#DIV/0!&quot;,&quot;&quot;) )
+validation_orig &lt;- read.csv(destfile_test, na.strings=c(&quot;NA&quot;,&quot;#DIV/0!&quot;,&quot;&quot;) )
 outcome &lt;- &quot;classe&quot;</code></pre>
-<p>The training set contains 19622 observations with 160 variables. The testing set contains 20 observations with 160 variables.</p>
+<p>The training set contains 19622 observations with 160 variables. The validation data set contains 20 observations with 160 variables.</p>
 </div>
 <div id="data-processing" class="section level2">
 <h2>Data Processing</h2>
-<p>Add new variables for time series effect.</p>
-<pre class="r"><code>## plot(decompose(ts1),xlab=&quot;Years+1&quot;)
-training2 &lt;- training
-training2$raw_timestamp_part_1_POSIXct &lt;- as.POSIXct(as.numeric(as.character(training$raw_timestamp_part_1)),origin=&quot;1970-01-01&quot;,tz=&quot;GMT&quot;)
-training2$weekdays &lt;- as.factor(weekdays(training2$raw_timestamp_part_1_POSIXct))
-training2$hours &lt;- format(training2$raw_timestamp_part_1_POSIXct,'%H')</code></pre>
+<p>Add new ‘hour’ to capture time series effect, if any.</p>
+<pre class="r"><code>training &lt;- training_orig
+training$raw_timestamp_part_1_POSIXct &lt;- as.POSIXct(as.numeric(as.character(training$raw_timestamp_part_1)),origin=&quot;1970-01-01&quot;,tz=&quot;GMT&quot;)
+training$hours &lt;- as.numeric(format(training$raw_timestamp_part_1_POSIXct,'%H'))
+## ditto for validation data set
+validation &lt;- validation_orig
+validation$raw_timestamp_part_1_POSIXct &lt;- as.POSIXct(as.numeric(as.character(validation$raw_timestamp_part_1)),origin=&quot;1970-01-01&quot;,tz=&quot;GMT&quot;)
+validation$hours &lt;- as.numeric(format(validation$raw_timestamp_part_1_POSIXct,'%H'))</code></pre>
+<p>Exclude predictors that are missing (NA) in the validation data set (they will not help even if they have prediction power in the training set).</p>
+<pre class="r"><code>validation &lt;- validation[colSums(is.na(validation)) &lt; 1*nrow(validation)]
+## keep the same columns for the training set
+cols &lt;- names(validation)
+training &lt;- training[ , which(names(training) %in% c(cols,outcome))]</code></pre>
+<p>Exclude time stamp &amp; index predictors that can mislead the model.</p>
+<pre class="r"><code>colsrm &lt;- c(&quot;X&quot;, &quot;raw_timestamp_part_1&quot;, &quot;raw_timestamp_part_2&quot;, &quot;cvtd_timestamp&quot;, &quot;raw_timestamp_part_1_POSIXct&quot;)
+training &lt;- training[ , -which(names(training) %in% c(colsrm))]
+validation &lt;- validation[ , -which(names(validation) %in% c(colsrm))]</code></pre>
+<p>The training set contains 19622 observations with 57 variables.</p>
+<p>Check predictors with &gt;20% missing values.</p>
+<pre class="r"><code>colnames(training)[colSums(is.na(training)) &gt;= 0.2*nrow(training)]</code></pre>
+<pre><code>character(0)</code></pre>
+<p>No such predictors. No need to remove anything.</p>
 <p>Exclude predictors with low variance.</p>
-<pre class="r"><code>to_exclude &lt;- nearZeroVar(training2)
+<pre class="r"><code>to_exclude &lt;- nearZeroVar(training)
 training2 &lt;- training[, -to_exclude]
-testing2 &lt;- testing[, -to_exclude]</code></pre>
-<p>Center, scale, impute missing values and perform Principal Component Analysis (PCA) on predictors to reduce the risk of overfitting.</p>
-<pre class="r"><code>training2 &lt;- training2[,-which(colnames(training2)==outcome )]
-preprocessParams &lt;- preProcess(training2, method=c(&quot;center&quot;, &quot;scale&quot;, &quot;pca&quot;, &quot;knnImpute&quot;))
-training3 &lt;- predict(preprocessParams, training2)
-training3[,outcome] &lt;- training[,outcome]
-## same processing for testing set
-testing3 &lt;- predict(preprocessParams, testing2)</code></pre>
-<p>The processed set contains 19622 observations with 41 variables (reduction from original 160 variables).</p>
+## ditto for validation set
+validation2 &lt;- validation[, -to_exclude]</code></pre>
+<p>The processed set contains 19622 observations with 56 variables (reduction from original 160 variables).</p>
+<div id="create-test-set" class="section level3">
+<h3>Create Test Set</h3>
+<pre class="r"><code>set.seed(123)
+partition &lt;- createDataPartition(training$classe, p = 0.75, list = FALSE)
+training3 &lt;- training2[partition,]
+testing3 &lt;- training2[-partition,]</code></pre>
+<p>Training set now contains 14718 observations with 56 variables.</p>
+<p>Testing set now contains 4904 observations with 56 variables.</p>
+</div>
 <div id="fit-alternative-models" class="section level3">
 <h3>Fit alternative models</h3>
-<p>I did not run glm, gbm and rf methods due to lack of computation power on my computer.</p>
+<ul>
+<li>Random Forest (rf)</li>
+<li>Stochastic Gradient Boosting (gbm)</li>
+<li>Conditional Inference Tree (ctree)</li>
+<li>Linear Discriminant Analysis (lda)</li>
+<li>CART (rpart)</li>
+</ul>
+<p>Combining predictor models.</p>
+<pre class="r"><code>t_rf &lt;- predict(mod_rf, testing3)
+t_gbm &lt;- predict(mod_gbm, testing3)
+t_ctree &lt;- predict(mod_ctree, testing3)
+t_lda &lt;- predict(mod_lda, testing3)
+t_rpart &lt;- predict(mod_rpart, testing3)
+
+predDF &lt;- data.frame(t_rf,t_gbm,t_ctree,t_lda,t_rpart,classe=testing3$classe)
+mod_comb &lt;- train(classe ~.,method=&quot;gam&quot;,data=predDF)
+t_comb &lt;- predict(mod_comb,predDF)</code></pre>
 </div>
-<div id="cross-validation---compare-accuracy" class="section level3">
-<h3>Cross-validation - compare accuracy</h3>
-<pre class="r"><code>cm4 &lt;- confusionMatrix(mod4$pred$pred, mod4$pred$obs)
-cm5 &lt;- confusionMatrix(mod5$pred$pred, mod5$pred$obs)
-cm1 &lt;- confusionMatrix(mod1$pred$pred, mod1$pred$obs)
-cm2 &lt;- confusionMatrix(mod2$pred$pred, mod2$pred$obs)
-df &lt;- data.frame(method=c(&quot;lda_mod4&quot;, &quot;rpart_mod5&quot;, &quot;bayesglm_mod1&quot;, &quot;rda_mod2&quot;), accuracy=c( cm4$overall['Accuracy'], cm5$overall['Accuracy'], cm1$overall['Accuracy'], cm2$overall['Accuracy'] ))
-df &lt;- df[with(df, order(-accuracy)), ]
-df</code></pre>
-<pre><code>         method  accuracy
-1      lda_mod4 0.9337478
-4      rda_mod2 0.6562277
-3 bayesglm_mod1 0.4769137
-2    rpart_mod5 0.3751232</code></pre>
-<p>The model with highest accuracy is lda_mod4 with accuracy 0.9337478.</p>
+<div id="check-models-on-testing-set" class="section level3">
+<h3>Check models on testing set</h3>
+<pre class="r"><code>cm_rf2 &lt;- confusionMatrix(t_rf, testing3$classe)
+cm_gbm2 &lt;- confusionMatrix(t_gbm, testing3$classe)
+cm_ctree2 &lt;- confusionMatrix(t_ctree, testing3$classe)
+cm_lda2 &lt;- confusionMatrix(t_lda, testing3$classe)
+cm_rpart2 &lt;- confusionMatrix(t_rpart, testing3$classe)
+cm_comb2 &lt;- confusionMatrix(t_comb, testing3$classe)
+
+df2 &lt;- data.frame(method=c(&quot;mod_rf&quot;, &quot;mod_gbm&quot;, &quot;mod_ctree&quot;, &quot;mod_lda&quot;, &quot;mod_rpart&quot;, &quot;mod_comb&quot;), accuracy=c( cm_rf2$overall['Accuracy'], cm_gbm2$overall['Accuracy'], cm_ctree2$overall['Accuracy'], cm_lda2$overall['Accuracy'], cm_rpart2$overall['Accuracy'], cm_comb2$overall['Accuracy'] ))
+df2 &lt;- df2[with(df2, order(-accuracy)), ]
+df2</code></pre>
+<pre><code>     method  accuracy
+1    mod_rf 0.9985726
+2   mod_gbm 0.9867455
+3 mod_ctree 0.8955954
+4   mod_lda 0.7455139
+5 mod_rpart 0.4879690
+6  mod_comb 0.4779772</code></pre>
+<p>The model with highest accuracy is mod_rf with accuracy 0.9985726.</p>
 </div>
-<div id="predict-values-for-testing-set" class="section level3">
-<h3>Predict values for testing set</h3>
+</div>
+<div id="predict-values-for-validation-set" class="section level2">
+<h2>Predict values for validation set</h2>
 <pre class="r"><code>## predict
-predict(mod4, testing3)</code></pre>
-<pre><code> [1] A A A A A A A A A A A A A A A B A A A B
-Levels: A B C D E</code></pre>
-</div>
+pred_rf &lt;- predict(mod_rf, validation2)
+pred_gbm &lt;- predict(mod_gbm, validation2)
+pred_ctree &lt;- predict(mod_ctree, validation2)
+pred_lda &lt;- predict(mod_lda, validation2)
+pred_rpart &lt;- predict(mod_rpart, validation2)
+
+df &lt;- data.frame(pred_rf,pred_gbm,pred_ctree,pred_lda,pred_rpart )
+df</code></pre>
+<pre><code>   pred_rf pred_gbm pred_ctree pred_lda pred_rpart
+1        B        B          C        B          C
+2        A        A          A        A          A
+3        B        B          B        B          C
+4        A        A          A        A          A
+5        A        A          A        A          A
+6        E        E          E        C          C
+7        D        D          B        D          C
+8        B        B          B        D          A
+9        A        A          A        A          A
+10       A        A          A        A          A
+11       B        B          B        D          C
+12       C        C          C        A          C
+13       B        B          B        B          C
+14       A        A          A        A          A
+15       E        E          E        B          C
+16       E        E          E        A          A
+17       A        A          A        A          A
+18       B        B          B        B          A
+19       B        B          B        B          A
+20       B        B          B        B          C</code></pre>
 </div>
 
 
